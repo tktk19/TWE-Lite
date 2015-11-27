@@ -37,6 +37,12 @@ extern "C" {
 /***        Exported Variables                                            ***/
 /****************************************************************************/
 
+#define SWITCH_SHIFT  12 // シフトスイッチ
+#define LED_RED     4    // LED赤
+#define LED_GLEEN  19    // LED緑
+#define LED_YELLOW 18    // LED黄 INFORM用途
+#define UART_BAUD 115200 // シリアルのボーレート
+
 #if defined __cplusplus
 }
 #endif

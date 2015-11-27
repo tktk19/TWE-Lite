@@ -8,39 +8,43 @@
  *     permission from TOCOS.
  *
  ****************************************************************************/
-/*
- * Test04.c
- *
- * TWE-Lite のデジタル入力 1 (DI1) が Lo に変化したらブロードキャストを行い
- * パケットを受信したら一定時間 デジタル出力 4 (DO4) を Hi にする
- *
- * ふたつの TWE-Lite モジュールを用意してそれぞれ DI1 にタクトスイッチ、
- * DO4 に LED を接続して動作を観察する
- *
- * 2015 KLab Inc.
- *
- */
 
-#include <string.h>          // C 標準ライブラリ用
-#include <AppHardwareApi.h>  // NXP ペリフェラル API 用
-#include "utils.h"           // ペリフェラル API のラッパなど
-#include "serial.h"          // シリアル用
-#include "sprintf.h"         // SPRINTF 用
+/****************************************************************************/
+/***        Include files                                                 ***/
+/****************************************************************************/
+#include <string.h>
 
+#include <jendefs.h>
+#include <AppHardwareApi.h>
+
+#include "utils.h"
+
+#include "SavacanSwitch.h"
+#include "config.h"
+#include "Version.h"
+
+// DEBUG options
+
+#include "serial.h"
+#include "fprintf.h"
+#include "sprintf.h"
+
+/****************************************************************************/
+/***        ToCoNet Definitions                                           ***/
+/****************************************************************************/
+// Select Modules (define befor include "ToCoNet.h")
+//#define ToCoNet_USE_MOD_NBSCAN // Neighbour scan module
+//#define ToCoNet_USE_MOD_NBSCAN_SLAVE
+
+// includes
 #include "ToCoNet.h"
-#include "ToCoNet_mod_prototype.h" // ToCoNet モジュール定義
+#include "ToCoNet_mod_prototype.h"
 
-#define DI1  12          // デジタル入力 1
-#define DO4  18          // デジタル出力 4
-#define UART_BAUD 115200 // シリアルのボーレート
+#include "app_event.h"
 
-// ToCoNet 用パラメータ
-#define APP_ID   0x38380001
-#define CHANNEL  18
-
-static tsFILE sSerStream;          // シリアル用ストリーム
-static tsSerialPortSetup sSerPort; // シリアルポートデスクリプタ
-static uint32 u32Seq;              // 送信パケットのシーケンス番号
+/****************************************************************************/
+/***        Macro Definitions                                             ***/
+/****************************************************************************/
 
 // デバッグメッセージ出力用
 #define DBG
@@ -50,198 +54,542 @@ static uint32 u32Seq;              // 送信パケットのシーケンス番号
 #define dbg(...)
 #endif
 
-// デバッグ出力用に UART を初期化
-static void vSerialInit() {
+/****************************************************************************/
+/***        Type Definitions                                              ***/
+/****************************************************************************/
+
+typedef struct
+{
+    // MAC
+    uint8 u8channel;
+    uint16 u16addr;
+
+    // LED Counter
+    uint32 u32LedCt;
+
+    // シーケンス番号
+    uint32 u32Seq;
+
+    // スリープカウンタ
+    uint8 u8SleepCt;
+} tsAppData;
+
+
+/****************************************************************************/
+/***        Local Function Prototypes                                     ***/
+/****************************************************************************/
+
+static void vProcessEvCore(tsEvent *pEv, teEvent eEvent, uint32 u32evarg);
+
+static void vInitHardware(int f_warm_start);
+
+void vSerialInit(uint32 u32Baud, tsUartOpt *pUartOpt);
+static void vHandleSerialInput(void);
+
+/****************************************************************************/
+/***        Exported Variables                                            ***/
+/****************************************************************************/
+
+/****************************************************************************/
+/***        Local Variables                                               ***/
+/****************************************************************************/
+/* Version/build information. This is not used in the application unless we
+   are in serial debug mode. However the 'used' attribute ensures it is
+   present in all binary files, allowing easy identifaction... */
+
+/* Local data used by the tag during operation */
+static tsAppData sAppData;
+
+PUBLIC tsFILE sSerStream;
+tsSerialPortSetup sSerPort;
+
+// Wakeup port
+const uint32 u32DioPortWakeUp = 1UL << 7; // UART Rx Port
+
+/****************************************************************************
+ *
+ * NAME: AppColdStart
+ *
+ * DESCRIPTION:
+ *
+ * RETURNS:
+ *
+ ****************************************************************************/
+void cbAppColdStart(bool_t bAfterAhiInit)
+{
+	//static uint8 u8WkState;
+	if (!bAfterAhiInit) {
+		// before AHI init, very first of code.
+
+		// Register modules
+		ToCoNet_REG_MOD_ALL();
+
+	} else {
+		// disable brown out detect
+		vAHI_BrownOutConfigure(0,//0:2.0V 1:2.3V
+				FALSE,
+				FALSE,
+				FALSE,
+				FALSE);
+
+		// clear application context
+		memset (&sAppData, 0x00, sizeof(sAppData));
+		sAppData.u8channel = CHANNEL;
+
+		// ToCoNet configuration
+		sToCoNet_AppContext.u32AppId = APP_ID;
+		sToCoNet_AppContext.u8Channel = CHANNEL;
+
+		sToCoNet_AppContext.bRxOnIdle = TRUE;
+
+		// others
+		SPRINTF_vInit128();
+
+		// Register
+		ToCoNet_Event_Register_State_Machine(vProcessEvCore);
+
+		// Others
+		vInitHardware(FALSE);
+
+		// MAC start
+		ToCoNet_vMacStart();
+	}
+}
+
+/****************************************************************************
+ *
+ * NAME: AppWarmStart
+ *
+ * DESCRIPTION:
+ *
+ * RETURNS:
+ *
+ ****************************************************************************/
+static bool_t bWakeupByButton;
+
+void cbAppWarmStart(bool_t bAfterAhiInit)
+{
+	if (!bAfterAhiInit) {
+		// before AHI init, very first of code.
+		//  to check interrupt source, etc.
+		bWakeupByButton = FALSE;
+
+		if(u8AHI_WakeTimerFiredStatus()) {
+			// wake up timer
+		} else
+		if(u32AHI_DioWakeStatus() & u32DioPortWakeUp) {
+			// woke up from DIO events
+			bWakeupByButton = TRUE;
+		} else {
+			bWakeupByButton = FALSE;
+		}
+	} else {
+		// Initialize hardware
+		vInitHardware(TRUE);
+
+		// MAC start
+		ToCoNet_vMacStart();
+	}
+}
+
+/****************************************************************************/
+/***        Local Functions                                               ***/
+/****************************************************************************/
+/****************************************************************************
+ *
+ * NAME: vMain
+ *
+ * DESCRIPTION:
+ *
+ * RETURNS:
+ *
+ ****************************************************************************/
+void cbToCoNet_vMain(void)
+{
+	/* handle uart input */
+	vHandleSerialInput();
+}
+
+/****************************************************************************
+ *
+ * NAME: cbToCoNet_vNwkEvent
+ *
+ * DESCRIPTION:
+ *
+ * PARAMETERS:      Name            RW  Usage
+ *
+ * RETURNS:
+ *
+ * NOTES:
+ ****************************************************************************/
+void cbToCoNet_vNwkEvent(teEvent eEvent, uint32 u32arg) {
+	switch(eEvent) {
+	default:
+		break;
+	}
+}
+
+/****************************************************************************
+ *
+ * NAME: cbvMcRxHandler
+ *
+ * DESCRIPTION:
+ *
+ * RETURNS:
+ *
+ ****************************************************************************/
+void cbToCoNet_vRxEvent(tsRxDataApp *pRx) {
+	int i;
+	static uint32 u32SrcAddrPrev = 0;
+	static uint16 u16seqPrev = 0xFFFF;
+	//uint8 *p = pRx->auData;
+
+	// print coming payload
+	vfPrintf(&sSerStream, LB"[PKT Ad:%04x,Ln:%03d,Seq:%03d,Lq:%03d,Tms:%05d \"",
+			pRx->u32SrcAddr,
+			pRx->u8Len+4, // Actual payload byte: the network layer uses additional 4 bytes.
+			pRx->u8Seq,
+			pRx->u8Lqi,
+			pRx->u32Tick & 0xFFFF);
+	for (i = 0; i < pRx->u8Len; i++) {
+		if (i < 32) {
+			sSerStream.bPutChar(sSerStream.u8Device,
+					(pRx->auData[i] >= 0x20 && pRx->auData[i] <= 0x7f) ? pRx->auData[i] : '.');
+		} else {
+			vfPrintf(&sSerStream, "..");
+			break;
+		}
+	}
+	vfPrintf(&sSerStream, "C\"]");
+
+	// 前回と同一の送信元＋シーケンス番号のパケットなら受け流す
+	if (pRx->u32SrcAddr == u32SrcAddrPrev && pRx->u8Seq == u16seqPrev) {
+		return;
+	}
+
+	u32SrcAddrPrev = pRx->u32SrcAddr;
+	u16seqPrev = pRx->u8Seq;
+
+	// turn on Led a while
+	sAppData.u32LedCt = u32TickCount_ms;
+
+	// ＵＡＲＴに出力
+	vfPrintf(&sSerStream, LB "Message from %08x" LB, pRx->u32SrcAddr);
+}
+
+/****************************************************************************
+ *
+ * NAME: cbvMcEvTxHandler
+ *
+ * DESCRIPTION:
+ *
+ * PARAMETERS:      Name            RW  Usage
+ *
+ * RETURNS:
+ *
+ * NOTES:
+ ****************************************************************************/
+void cbToCoNet_vTxEvent(uint8 u8CbId, uint8 bStatus) {
+	return;
+}
+
+/****************************************************************************
+ *
+ * NAME: cbToCoNet_vHwEvent
+ *
+ * DESCRIPTION:
+ * Process any hardware events.
+ *
+ * PARAMETERS:      Name            RW  Usage
+ *                  u32DeviceId
+ *                  u32ItemBitmap
+ *
+ * RETURNS:
+ * None.
+ *
+ * NOTES:
+ * None.
+ ****************************************************************************/
+void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
+{
+    switch (u32DeviceId) {
+    case E_AHI_DEVICE_TICK_TIMER:
+		// LED BLINK
+   		vPortSet_TrueAsLo(LED_RED, u32TickCount_ms & 0x400);
+
+   		// LED ON when receive
+   		if (u32TickCount_ms - sAppData.u32LedCt < 300) {
+   			vPortSetLo(LED_YELLOW);
+   		} else {
+  			vPortSetHi(LED_YELLOW);
+   		}
+    	break;
+
+    default:
+    	break;
+    }
+}
+
+/****************************************************************************
+ *
+ * NAME: cbToCoNet_u8HwInt
+ *
+ * DESCRIPTION:
+ *   called during an interrupt
+ *
+ * PARAMETERS:      Name            RW  Usage
+ *                  u32DeviceId
+ *                  u32ItemBitmap
+ *
+ * RETURNS:
+ *                  FALSE -  interrupt is not handled, escalated to further
+ *                           event call (cbToCoNet_vHwEvent).
+ *                  TRUE  -  interrupt is handled, no further call.
+ *
+ * NOTES:
+ *   Do not put a big job here.
+ ****************************************************************************/
+uint8 cbToCoNet_u8HwInt(uint32 u32DeviceId, uint32 u32ItemBitmap) {
+	//TODO LED点滅制御等はこちらで実施を推奨とのこと
+	return FALSE;
+}
+
+/****************************************************************************
+ *
+ * NAME: vInitHardware
+ *
+ * DESCRIPTION:
+ *
+ * RETURNS:
+ *
+ ****************************************************************************/
+static void vInitHardware(int f_warm_start)
+{
+	// Serial Initialize
+#if 0
+	// UART の細かい設定テスト
+	tsUartOpt sUartOpt;
+	memset(&sUartOpt, 0, sizeof(tsUartOpt));
+	sUartOpt.bHwFlowEnabled = FALSE;
+	sUartOpt.bParityEnabled = E_AHI_UART_PARITY_ENABLE;
+	sUartOpt.u8ParityType = E_AHI_UART_EVEN_PARITY;
+	sUartOpt.u8StopBit = E_AHI_UART_2_STOP_BITS;
+	sUartOpt.u8WordLen = 7;
+
+	vSerialInit(UART_BAUD, &sUartOpt);
+#else
+	vSerialInit(UART_BAUD, NULL);
+#endif
+
+
+	ToCoNet_vDebugInit(&sSerStream);
+	ToCoNet_vDebugLevel(0);
+
+	/// IOs
+	vPortSetLo(LED_YELLOW);
+	vPortSetHi(LED_RED);
+	vPortAsOutput(LED_YELLOW);
+	vPortAsOutput(LED_RED);
+}
+
+/****************************************************************************
+ *
+ * NAME: vInitHardware
+ *
+ * DESCRIPTION:
+ *
+ * RETURNS:
+ *
+ ****************************************************************************/
+void vSerialInit(uint32 u32Baud, tsUartOpt *pUartOpt) {
+	/* Create the debug port transmit and receive queues */
 	static uint8 au8SerialTxBuffer[96];
 	static uint8 au8SerialRxBuffer[32];
 
+	/* Initialise the serial port to be used for debug output */
 	sSerPort.pu8SerialRxQueueBuffer = au8SerialRxBuffer;
 	sSerPort.pu8SerialTxQueueBuffer = au8SerialTxBuffer;
-	sSerPort.u32BaudRate = UART_BAUD;
+	sSerPort.u32BaudRate = u32Baud;
 	sSerPort.u16AHI_UART_RTS_LOW = 0xffff;
 	sSerPort.u16AHI_UART_RTS_HIGH = 0xffff;
 	sSerPort.u16SerialRxQueueSize = sizeof(au8SerialRxBuffer);
 	sSerPort.u16SerialTxQueueSize = sizeof(au8SerialTxBuffer);
-	sSerPort.u8SerialPort = E_AHI_UART_0;
+	sSerPort.u8SerialPort = UART_PORT_SLAVE;
 	sSerPort.u8RX_FIFO_LEVEL = E_AHI_UART_FIFO_LEVEL_1;
-	SERIAL_vInit(&sSerPort);
+	SERIAL_vInitEx(&sSerPort, pUartOpt);
 
 	sSerStream.bPutChar = SERIAL_bTxChar;
-	sSerStream.u8Device = E_AHI_UART_0;
+	sSerStream.u8Device = UART_PORT_SLAVE;
 }
 
-// ハードウェア初期化
-static void vInitHardware()
+/****************************************************************************
+ *
+ * NAME: vHandleSerialInput
+ *
+ * DESCRIPTION:
+ *
+ * PARAMETERS:      Name            RW  Usage
+ *
+ * RETURNS:
+ *
+ * NOTES:
+ ****************************************************************************/
+static void vHandleSerialInput(void)
 {
-	// デバッグ出力用
-	vSerialInit();
-	ToCoNet_vDebugInit(&sSerStream);
-	ToCoNet_vDebugLevel(0);
+    // handle UART command
+	while (!SERIAL_bRxQueueEmpty(sSerPort.u8SerialPort)) {
+		int16 i16Char;
 
-	// 使用ポートの設定
-	vPortAsInput(DI1);
-	vPortAsOutput(DO4);
-	vPortSetLo(DO4);
-}
+		i16Char = SERIAL_i16RxChar(sSerPort.u8SerialPort);
 
-// ブロードキャスト実行
-static bool_t sendBroadcast ()
-{
-	tsTxDataApp tsTx;
-	memset(&tsTx, 0, sizeof(tsTxDataApp));
+		vfPrintf(&sSerStream, "\n\r# [%c] --> ", i16Char);
+	    SERIAL_vFlush(sSerStream.u8Device);
 
-	tsTx.u32SrcAddr = ToCoNet_u32GetSerial();
-	tsTx.u32DstAddr = TOCONET_MAC_ADDR_BROADCAST;
+		switch(i16Char) {
 
-	tsTx.bAckReq = FALSE;
-	tsTx.u8Retry = 0x02; // 送信失敗時は 2回再送
-	tsTx.u8CbId = u32Seq & 0xFF;
-	tsTx.u8Seq = u32Seq & 0xFF;
-	tsTx.u8Cmd = TOCONET_PACKET_CMD_APP_DATA;
+		case '>': case '.':
+			/* channel up */
+			sAppData.u8channel++;
+			if (sAppData.u8channel > 26) sAppData.u8channel = 11;
+			sToCoNet_AppContext.u8Channel = sAppData.u8channel;
+			ToCoNet_vRfConfig();
+			vfPrintf(&sSerStream, "set channel to %d.", sAppData.u8channel);
+			break;
 
-	// SPRINTF でペイロードを作成
-	SPRINTF_vRewind();
-	vfPrintf(SPRINTF_Stream, "Hello! from %08X seq=%u", ToCoNet_u32GetSerial(), u32Seq);
-	memcpy(tsTx.auData, SPRINTF_pu8GetBuff(), SPRINTF_u16Length());
-	tsTx.u8Len = SPRINTF_u16Length();
-	u32Seq++;
+		case '<': case ',':
+			/* channel down */
+			sAppData.u8channel--;
+			if (sAppData.u8channel < 11) sAppData.u8channel = 26;
+			sToCoNet_AppContext.u8Channel = sAppData.u8channel;
+			ToCoNet_vRfConfig();
+			vfPrintf(&sSerStream, "set channel to %d.", sAppData.u8channel);
+			break;
 
-	// 送信
-	return ToCoNet_bMacTxReq(&tsTx);
-}
+		case 'd': case 'D':
+			_C {
+				static uint8 u8DgbLvl;
 
-// ユーザ定義のイベントハンドラ
-static void vProcessEvCore(tsEvent *pEv, teEvent eEvent, uint32 u32evarg)
-{
-	static bool_t count = 0;
+				u8DgbLvl++;
+				if(u8DgbLvl > 5) u8DgbLvl = 0;
+				ToCoNet_vDebugLevel(u8DgbLvl);
 
-	// 起動時
-	if (eEvent == E_EVENT_START_UP) {
-		dbg("** Test04 **");
-	}
-	// データ受信時に DO4 を Hi に
-	if (eEvent == E_ORDER_KICK) {
-		count = 10;
-		vPortSetHi(DO4);
-	}
-	 // 4ms 周期のシステムタイマ通知
-	if (eEvent == E_EVENT_TICK_SECOND) {
-		if (count > 0) {
-			count--;
-		} else {
-			// DO4 が Hi なら Lo に
-			if (!bPortRead(DO4)) {
-				vPortSetLo(DO4);
+				vfPrintf(&sSerStream, "set NwkCode debug level to %d.", u8DgbLvl);
 			}
+			break;
+
+		case 's': case 'S':
+			// スリープのテストコード
+			_C {
+				// print message.
+				sAppData.u8SleepCt++;
+
+				// stop interrupt source, if interrupt source is still running.
+				;
+
+				vfPrintf(&sSerStream, "now sleeping" LB);
+				SERIAL_vFlush(sSerStream.u8Device); // flushing
+
+				if (i16Char == 's') {
+					vAHI_UartDisable(sSerStream.u8Device);
+				}
+
+				// set UART Rx port as interrupt source
+				vAHI_DioSetDirection(u32DioPortWakeUp, 0); // set as input
+
+				(void)u32AHI_DioInterruptStatus(); // clear interrupt register
+				vAHI_DioWakeEnable(u32DioPortWakeUp, 0); // also use as DIO WAKE SOURCE
+				// vAHI_DioWakeEdge(0, PORT_INPUT_MASK); // 割り込みエッジ（立下りに設定）
+				vAHI_DioWakeEdge(u32DioPortWakeUp, 0); // 割り込みエッジ（立上がりに設定）
+				// vAHI_DioWakeEnable(0, PORT_INPUT_MASK); // DISABLE DIO WAKE SOURCE
+
+				// wake up using wakeup timer as well.
+				// ToCoNet_vSleep(E_AHI_WAKE_TIMER_0, 0, FALSE, TRUE); // RAM OFF SLEEP USING WK0
+				ToCoNet_vSleep(E_AHI_WAKE_TIMER_0, 0, FALSE, FALSE); // RAM ON SLEEP USING WK0
+			}
+			break;
+
+		case 'p':
+			// 出力調整のテスト
+			_C {
+				static uint8 u8pow = 3; // (MIN)0..3(MAX)
+
+				u8pow = (u8pow + 1) % 4;
+				vfPrintf(&sSerStream, "set power to %d.", u8pow);
+
+				sToCoNet_AppContext.u8TxPower = u8pow;
+				ToCoNet_vRfConfig();
+			}
+			break;
+
+		case 't': // パケット送信してみる
+			_C {
+				// transmit Ack back
+				tsTxDataApp tsTx;
+				memset(&tsTx, 0, sizeof(tsTxDataApp));
+
+				sAppData.u32Seq++;
+
+				tsTx.u32SrcAddr = ToCoNet_u32GetSerial(); // 自身のアドレス
+				tsTx.u32DstAddr = 0xFFFF; // ブロードキャスト
+
+				tsTx.bAckReq = FALSE;
+				tsTx.u8Retry = 0x82; // ブロードキャストで都合３回送る
+				tsTx.u8CbId = sAppData.u32Seq & 0xFF;
+				tsTx.u8Seq = sAppData.u32Seq & 0xFF;
+				tsTx.u8Cmd = TOCONET_PACKET_CMD_APP_DATA;
+
+				// SPRINTF でメッセージを作成
+				SPRINTF_vRewind();
+				vfPrintf(SPRINTF_Stream, "PING: %08X", ToCoNet_u32GetSerial());
+				memcpy(tsTx.auData, SPRINTF_pu8GetBuff(), SPRINTF_u16Length());
+				tsTx.u8Len = SPRINTF_u16Length();
+
+				// 送信
+				ToCoNet_bMacTxReq(&tsTx);
+
+				// LEDの制御
+				sAppData.u32LedCt = u32TickCount_ms;
+
+				// ＵＡＲＴに出力
+				vfPrintf(&sSerStream, LB "Fire PING Broadcast Message.");
+			}
+			break;
+
+		default:
+			break;
 		}
+
+		vfPrintf(&sSerStream, LB);
+	    SERIAL_vFlush(sSerStream.u8Device);
 	}
-	return;
 }
 
-//
-// 以下 ToCoNet 既定のイベントハンドラ群
-//
-
-// 割り込み発生後に随時呼び出される
-void cbToCoNet_vMain(void)
-{
-	static bool_t stsPrev = TRUE;
-
-	bool_t sts = bPortRead(DI1);
-	if (sts != stsPrev) {
-		// DI1 が Hi -> Lo に変化したら送信を行う
-		if (sts) {
-			sendBroadcast();
+/****************************************************************************
+ *
+ * NAME: vProcessEvent
+ *
+ * DESCRIPTION:
+ *
+ * RETURNS:
+ *
+ ****************************************************************************/
+static void vProcessEvCore(tsEvent *pEv, teEvent eEvent, uint32 u32evarg) {
+	if (eEvent == E_EVENT_START_UP) {
+		// ここで UART のメッセージを出力すれば安全である。
+		if (u32evarg & EVARG_START_UP_WAKEUP_RAMHOLD_MASK) {
+			vfPrintf(&sSerStream, LB "RAMHOLD");
 		}
-		stsPrev = sts;
-		dbg("DI1 is [%s]", (sts) ? "Lo" : "Hi");
-	}
-	return;
-}
-
-// パケット受信時
-void cbToCoNet_vRxEvent(tsRxDataApp *pRx)
-{
-	static uint32 u32SrcAddrPrev = 0;
-	static uint8 u8seqPrev = 0xFF;
-
-	// 前回と同一の送信元＋シーケンス番号のパケットなら受け流す
-	if (pRx->u32SrcAddr == u32SrcAddrPrev && pRx->u8Seq == u8seqPrev) {
-		return;
-	}
-	// ペイロードを切り出してデバッグ出力
-	char buf[64];
-	int len = (pRx->u8Len < sizeof(buf)) ? pRx->u8Len : sizeof(buf)-1;
-	memcpy(buf, pRx->auData, len);
-	buf[len] = '\0';
-	dbg("RECV << [%s]", buf);
-
-	u32SrcAddrPrev = pRx->u32SrcAddr;
-	u8seqPrev = pRx->u8Seq;
-
-	// DO4 を一定時間 Hi にする
-	ToCoNet_Event_Process(E_ORDER_KICK, 0, vProcessEvCore);
-	return;
-}
-
-// パケット送信完了時
-void cbToCoNet_vTxEvent(uint8 u8CbId, uint8 bStatus)
-{
-	dbg(">> SEND %s seq=%u", bStatus ? "OK" : "NG", u32Seq);
-	return;
-}
-
-// ネットワークイベント発生時
-void cbToCoNet_vNwkEvent(teEvent eEvent, uint32 u32arg)
-{
-	return;
-}
-
-// ハードウェア割り込み発生後（遅延呼び出し）
-void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
-{
-	return;
-}
-
-// ハードウェア割り込み発生時
-uint8 cbToCoNet_u8HwInt(uint32 u32DeviceId, uint32 u32ItemBitmap)
-{
-	return FALSE;
-}
-
-// コールドスタート時
-void cbAppColdStart(bool_t bAfterAhiInit)
-{
-	if (!bAfterAhiInit) {
-		// 必要モジュール登録手続き
-		ToCoNet_REG_MOD_ALL();
-	} else {
-		// SPRINTF 初期化
-		SPRINTF_vInit128();
-
-		// ToCoNet パラメータ
-		sToCoNet_AppContext.u32AppId = APP_ID;
-		sToCoNet_AppContext.u8Channel = CHANNEL;
-		sToCoNet_AppContext.bRxOnIdle = TRUE; // アイドル時にも受信
-		u32Seq = 0;
-
-		// ユーザ定義のイベントハンドラを登録
-		ToCoNet_Event_Register_State_Machine(vProcessEvCore);
-
-		// ハードウェア初期化
-		vInitHardware();
-
-		// MAC 層開始
-		ToCoNet_vMacStart();
+	    if (u32evarg & EVARG_START_UP_WAKEUP_MASK) {
+			vfPrintf(&sSerStream, LB "Wake up by %s. SleepCt=%d",
+					bWakeupByButton ? "UART PORT" : "WAKE TIMER",
+					sAppData.u8SleepCt);
+	    } else {
+	    	vfPrintf(&sSerStream, "\r\n*** ToCoNet PINGPONG SAMPLE %d.%02d-%d ***", VERSION_MAIN, VERSION_SUB, VERSION_VAR);
+	    	vfPrintf(&sSerStream, "\r\n*** %08x ***", ToCoNet_u32GetSerial());
+	    }
 	}
 }
 
-// ウォームスタート時
-void cbAppWarmStart(bool_t bAfterAhiInit)
-{
-	if (!bAfterAhiInit) {
-	} else {
-		vInitHardware();
-		ToCoNet_vMacStart();
-	}
-}
+/****************************************************************************/
+/***        END OF FILE                                                   ***/
+/****************************************************************************/
