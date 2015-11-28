@@ -26,6 +26,7 @@ objs_JN5164/SavacanSwitch.o:  \
   /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/../../Wks_libToCoNet/libToCoNet/include/ToCoNetUtils/utils.h \
   /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/SavacanSwitch/Source/SavacanSwitch.h \
   /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/Common/Source/config.h \
+  /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/Common/Source/common.h \
   /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/SavacanSwitch/Source/Version.h \
   /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/../../Wks_libToCoNet/libToCoNet/include/ToCoNetUtils/serial.h \
   /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/../../Wks_libToCoNet/libToCoNet/include/ToCoNetUtils/uart.h \
@@ -110,6 +111,8 @@ objs_JN5164/SavacanSwitch.o:  \
 /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/SavacanSwitch/Source/SavacanSwitch.h:
 
 /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/Common/Source/config.h:
+
+/cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/Common/Source/common.h:
 
 /cygdrive/c/TWESDK/Wks_ToCoNet/Savacan_Switch/SavacanSwitch/Source/Version.h:
 

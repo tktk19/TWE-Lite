@@ -1,5 +1,5 @@
 /****************************************************************************
- * (C) Tokyo Cosmos Electric, Inc. (TOCOS) - 2013 all rights reserved.
+ * (C) Skyarchnetworks, Inc. - 2015 - 2016 all rights reserved.
  *
  * Condition to use:
  *   - The full or part of source code is limited to use for TWE (TOCOS
@@ -7,6 +7,13 @@
  *   - The full or part of source code is prohibited to distribute without
  *     permission from TOCOS.
  *
+ * 利用条件:
+ *   - 本ソースコードは、別途ソースコードライセンス記述が無い限り東京コスモス電機が著作権を
+ *     保有しています。
+ *   - 本ソースコードは、無保証・無サポートです。本ソースコードや生成物を用いたいかなる損害
+ *     についても東京コスモス電機は保証致しません。不具合等の報告は歓迎いたします。
+ *   - 本ソースコードは、東京コスモス電機が販売する TWE シリーズ上で実行する前提で公開
+ *     しています。他のマイコン等への移植・流用は一部であっても出来ません。
  ****************************************************************************/
 
 /****************************************************************************/
@@ -20,7 +27,10 @@
 #include "utils.h"
 
 #include "SavacanSwitch.h"
+
+#include "common.h"
 #include "config.h"
+
 #include "Version.h"
 
 // DEBUG options
@@ -46,34 +56,9 @@
 /***        Macro Definitions                                             ***/
 /****************************************************************************/
 
-// デバッグメッセージ出力用
-#define DBG
-#ifdef DBG
-#define dbg(...) vfPrintf(&sSerStream, LB __VA_ARGS__)
-#else
-#define dbg(...)
-#endif
-
 /****************************************************************************/
 /***        Type Definitions                                              ***/
 /****************************************************************************/
-
-typedef struct
-{
-    // MAC
-    uint8 u8channel;
-    uint16 u16addr;
-
-    // LED Counter
-    uint32 u32LedCt;
-
-    // シーケンス番号
-    uint32 u32Seq;
-
-    // スリープカウンタ
-    uint8 u8SleepCt;
-} tsAppData;
-
 
 /****************************************************************************/
 /***        Local Function Prototypes                                     ***/
@@ -135,6 +120,7 @@ void cbAppColdStart(bool_t bAfterAhiInit)
 		// clear application context
 		memset (&sAppData, 0x00, sizeof(sAppData));
 		sAppData.u8channel = CHANNEL;
+		sAppData.mode = FALSE;
 
 		// ToCoNet configuration
 		sToCoNet_AppContext.u32AppId = APP_ID;
@@ -206,6 +192,21 @@ void cbAppWarmStart(bool_t bAfterAhiInit)
  ****************************************************************************/
 void cbToCoNet_vMain(void)
 {
+	static unsigned char stsPrev = 0xFF;
+	bool_t sts = bPortRead(SWITCH_SHIFT);
+
+	// スイッチが押される度に自身のモードを切り替え
+	if (sts != stsPrev) {
+		stsPrev = sts;
+		// スイッチの押し終わりを検出
+		if (bPortRead(SWITCH_SHIFT)) {
+			sAppData.mode = !sAppData.mode;
+			vPortSet_TrueAsLo(LED_RED, sAppData.mode);
+			vPortSet_TrueAsLo(LED_GLEEN, !sAppData.mode);
+		}
+		DBGOUT(1, LB "SWITCH CHANGED -> %d", bPortRead(sts));
+	}
+
 	/* handle uart input */
 	vHandleSerialInput();
 }
@@ -245,7 +246,7 @@ void cbToCoNet_vRxEvent(tsRxDataApp *pRx) {
 	//uint8 *p = pRx->auData;
 
 	// print coming payload
-	vfPrintf(&sSerStream, LB"[PKT Ad:%04x,Ln:%03d,Seq:%03d,Lq:%03d,Tms:%05d \"",
+	DBGOUT(1, LB"[PKT Ad:%04x,Ln:%03d,Seq:%03d,Lq:%03d,Tms:%05d \"",
 			pRx->u32SrcAddr,
 			pRx->u8Len+4, // Actual payload byte: the network layer uses additional 4 bytes.
 			pRx->u8Seq,
@@ -256,11 +257,11 @@ void cbToCoNet_vRxEvent(tsRxDataApp *pRx) {
 			sSerStream.bPutChar(sSerStream.u8Device,
 					(pRx->auData[i] >= 0x20 && pRx->auData[i] <= 0x7f) ? pRx->auData[i] : '.');
 		} else {
-			vfPrintf(&sSerStream, "..");
+			V_PRINT("..");
 			break;
 		}
 	}
-	vfPrintf(&sSerStream, "C\"]");
+	V_PRINT("C\"]");
 
 	// 前回と同一の送信元＋シーケンス番号のパケットなら受け流す
 	if (pRx->u32SrcAddr == u32SrcAddrPrev && pRx->u8Seq == u16seqPrev) {
@@ -270,11 +271,11 @@ void cbToCoNet_vRxEvent(tsRxDataApp *pRx) {
 	u32SrcAddrPrev = pRx->u32SrcAddr;
 	u16seqPrev = pRx->u8Seq;
 
-	// turn on Led a while
-	sAppData.u32LedCt = u32TickCount_ms;
+	// とりあえず受信したらinformLEDを5秒点滅させる
+	sAppData.remainCntInform = 5;
 
-	// ＵＡＲＴに出力
-	vfPrintf(&sSerStream, LB "Message from %08x" LB, pRx->u32SrcAddr);
+	// UARTに出力
+	DBGOUT(1, LB "Message from %08x" LB, pRx->u32SrcAddr);
 }
 
 /****************************************************************************
@@ -314,15 +315,15 @@ void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
 {
     switch (u32DeviceId) {
     case E_AHI_DEVICE_TICK_TIMER:
-		// LED BLINK
-   		vPortSet_TrueAsLo(LED_RED, u32TickCount_ms & 0x400);
 
-   		// LED ON when receive
-   		if (u32TickCount_ms - sAppData.u32LedCt < 300) {
-   			vPortSetLo(LED_YELLOW);
-   		} else {
-  			vPortSetHi(LED_YELLOW);
-   		}
+		// InformLED BLINK
+    	if (u32TickCount_ms & 0x400) {
+    		if (sAppData.remainCntInform > 0) {
+				vPortSet_TrueAsLo(LED_YELLOW, TRUE);
+				sAppData.remainCntInform--;
+    		}
+    		V_PRINT("remainCntInfrom -> $d", sAppData.remainCntInform);
+    	}
     	break;
 
     default:
@@ -350,7 +351,6 @@ void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
  *   Do not put a big job here.
  ****************************************************************************/
 uint8 cbToCoNet_u8HwInt(uint32 u32DeviceId, uint32 u32ItemBitmap) {
-	//TODO LED点滅制御等はこちらで実施を推奨とのこと
 	return FALSE;
 }
 
@@ -381,15 +381,22 @@ static void vInitHardware(int f_warm_start)
 	vSerialInit(UART_BAUD, NULL);
 #endif
 
-
 	ToCoNet_vDebugInit(&sSerStream);
 	ToCoNet_vDebugLevel(0);
 
 	/// IOs
-	vPortSetLo(LED_YELLOW);
-	vPortSetHi(LED_RED);
-	vPortAsOutput(LED_YELLOW);
+	// Input
+	vPortAsInput(SWITCH_SHIFT);
+
+	// Output
 	vPortAsOutput(LED_RED);
+	vPortAsOutput(LED_YELLOW);
+	vPortAsOutput(LED_GLEEN);
+
+	vPortSetHi(LED_RED);
+	vPortSetHi(LED_YELLOW);
+	vPortSetLo(LED_GLEEN);
+
 }
 
 /****************************************************************************
@@ -442,69 +449,18 @@ static void vHandleSerialInput(void)
 
 		i16Char = SERIAL_i16RxChar(sSerPort.u8SerialPort);
 
-		vfPrintf(&sSerStream, "\n\r# [%c] --> ", i16Char);
+		V_PRINT(LB "# [%c] --> ", i16Char);
 	    SERIAL_vFlush(sSerStream.u8Device);
 
 		switch(i16Char) {
 
-		case '>': case '.':
-			/* channel up */
-			sAppData.u8channel++;
-			if (sAppData.u8channel > 26) sAppData.u8channel = 11;
-			sToCoNet_AppContext.u8Channel = sAppData.u8channel;
-			ToCoNet_vRfConfig();
-			vfPrintf(&sSerStream, "set channel to %d.", sAppData.u8channel);
-			break;
-
-		case '<': case ',':
-			/* channel down */
-			sAppData.u8channel--;
-			if (sAppData.u8channel < 11) sAppData.u8channel = 26;
-			sToCoNet_AppContext.u8Channel = sAppData.u8channel;
-			ToCoNet_vRfConfig();
-			vfPrintf(&sSerStream, "set channel to %d.", sAppData.u8channel);
-			break;
-
-		case 'd': case 'D':
+		case 'd':
 			_C {
-				static uint8 u8DgbLvl;
+				sAppData.u8DebugLevel++;
+				if (sAppData.u8DebugLevel > 5)
+					sAppData.u8DebugLevel = 0;
 
-				u8DgbLvl++;
-				if(u8DgbLvl > 5) u8DgbLvl = 0;
-				ToCoNet_vDebugLevel(u8DgbLvl);
-
-				vfPrintf(&sSerStream, "set NwkCode debug level to %d.", u8DgbLvl);
-			}
-			break;
-
-		case 's': case 'S':
-			// スリープのテストコード
-			_C {
-				// print message.
-				sAppData.u8SleepCt++;
-
-				// stop interrupt source, if interrupt source is still running.
-				;
-
-				vfPrintf(&sSerStream, "now sleeping" LB);
-				SERIAL_vFlush(sSerStream.u8Device); // flushing
-
-				if (i16Char == 's') {
-					vAHI_UartDisable(sSerStream.u8Device);
-				}
-
-				// set UART Rx port as interrupt source
-				vAHI_DioSetDirection(u32DioPortWakeUp, 0); // set as input
-
-				(void)u32AHI_DioInterruptStatus(); // clear interrupt register
-				vAHI_DioWakeEnable(u32DioPortWakeUp, 0); // also use as DIO WAKE SOURCE
-				// vAHI_DioWakeEdge(0, PORT_INPUT_MASK); // 割り込みエッジ（立下りに設定）
-				vAHI_DioWakeEdge(u32DioPortWakeUp, 0); // 割り込みエッジ（立上がりに設定）
-				// vAHI_DioWakeEnable(0, PORT_INPUT_MASK); // DISABLE DIO WAKE SOURCE
-
-				// wake up using wakeup timer as well.
-				// ToCoNet_vSleep(E_AHI_WAKE_TIMER_0, 0, FALSE, TRUE); // RAM OFF SLEEP USING WK0
-				ToCoNet_vSleep(E_AHI_WAKE_TIMER_0, 0, FALSE, FALSE); // RAM ON SLEEP USING WK0
+				V_PRINT("set App debug level to %d." LB, sAppData.u8DebugLevel);
 			}
 			break;
 
@@ -514,7 +470,7 @@ static void vHandleSerialInput(void)
 				static uint8 u8pow = 3; // (MIN)0..3(MAX)
 
 				u8pow = (u8pow + 1) % 4;
-				vfPrintf(&sSerStream, "set power to %d.", u8pow);
+				V_PRINT("set power to %d.", u8pow);
 
 				sToCoNet_AppContext.u8TxPower = u8pow;
 				ToCoNet_vRfConfig();
@@ -547,11 +503,8 @@ static void vHandleSerialInput(void)
 				// 送信
 				ToCoNet_bMacTxReq(&tsTx);
 
-				// LEDの制御
-				sAppData.u32LedCt = u32TickCount_ms;
-
-				// ＵＡＲＴに出力
-				vfPrintf(&sSerStream, LB "Fire PING Broadcast Message.");
+				// UARTに出力
+				DBGOUT(1, LB "Broadcast Message Sent.");
 			}
 			break;
 
@@ -559,7 +512,7 @@ static void vHandleSerialInput(void)
 			break;
 		}
 
-		vfPrintf(&sSerStream, LB);
+		DBGOUT(1, LB);
 	    SERIAL_vFlush(sSerStream.u8Device);
 	}
 }
@@ -575,19 +528,54 @@ static void vHandleSerialInput(void)
  ****************************************************************************/
 static void vProcessEvCore(tsEvent *pEv, teEvent eEvent, uint32 u32evarg) {
 	if (eEvent == E_EVENT_START_UP) {
-		// ここで UART のメッセージを出力すれば安全である。
-		if (u32evarg & EVARG_START_UP_WAKEUP_RAMHOLD_MASK) {
-			vfPrintf(&sSerStream, LB "RAMHOLD");
-		}
-	    if (u32evarg & EVARG_START_UP_WAKEUP_MASK) {
-			vfPrintf(&sSerStream, LB "Wake up by %s. SleepCt=%d",
-					bWakeupByButton ? "UART PORT" : "WAKE TIMER",
-					sAppData.u8SleepCt);
-	    } else {
-	    	vfPrintf(&sSerStream, "\r\n*** ToCoNet PINGPONG SAMPLE %d.%02d-%d ***", VERSION_MAIN, VERSION_SUB, VERSION_VAR);
-	    	vfPrintf(&sSerStream, "\r\n*** %08x ***", ToCoNet_u32GetSerial());
-	    }
+		// 起動
+
+
 	}
+}
+
+
+/** @ingroup MASTER
+ * IO 情報を送信します。
+ *
+ * - IO状態の変化、および１秒置きの定期送時に呼び出されます。
+ *
+ * - Packet 構造
+ *   - BE_DWORD: 送信元のシリアル番号
+ *   - OCTET: 宛先論理ID
+ *   - BE_WORD: 送信タイムスタンプ (64fps カウンタの値の下１６ビット, 約1000秒で１周する)
+ *   - OCTET: 中継フラグ(中継したパケットは１、最初の送信なら０を格納）
+ *   - BE_WORD: 電圧
+ *   - OCTET: 温度 (int8型)  ※ TODO: 値が不正確。ADC 値から温度への変換式がメーカより開示されないため。
+ *   - OCTET: ボタン (LSB から順に SW1 ... SW4, 1=Lo), 0x80ビットは通常送信の識別用フラグ
+ *   - OCTET: ボタン変化 (LSB から順に SW1 ... SW4, 1=変化)
+ *
+ * @returns -1:ERROR, 0..255 CBID
+ */
+static int16 i16TransmitIoData(bool_t bQuick, bool_t bRegular) {
+	int16 i16Ret = -1;
+	tsTxDataApp sTx;
+	memset(&sTx, 0, sizeof(sTx));
+
+	uint8 *q = sTx.auData;
+
+	// ペイロードを構成
+	S_OCTET(sAppData.mode); // 自身のモードを親機に送信
+
+	{
+		/* MAC モードでは細かい指定が可能 */
+		sTx.bAckReq = FALSE;
+		sTx.u32SrcAddr = sToCoNet_AppContext.u16ShortAddress;
+		sTx.u16RetryDur = bQuick ? 0 : 4; // 再送間隔
+		sTx.u16DelayMax = bQuick ? 0 : 16; // 衝突を抑制するため送信タイミングにブレを作る(最大16ms)
+
+		// 送信API
+		if (ToCoNet_bMacTxReq(&sTx)) {
+			i16Ret = sTx.u8CbId;
+		}
+	}
+
+	return i16Ret;
 }
 
 /****************************************************************************/
