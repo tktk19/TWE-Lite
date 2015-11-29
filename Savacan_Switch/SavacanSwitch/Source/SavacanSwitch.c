@@ -271,8 +271,32 @@ void cbToCoNet_vRxEvent(tsRxDataApp *pRx) {
 	u32SrcAddrPrev = pRx->u32SrcAddr;
 	u16seqPrev = pRx->u8Seq;
 
-	// とりあえず受信したらinformLEDを5秒点滅させる
-	sAppData.remainCntInform = 5;
+
+	//TODO pRx->auData変換がうまくいかない
+	// ペイロードを切り出してデバッグ出力
+	/*
+	char rcvCode[2];
+	int len = (pRx->u8Len < sizeof(rcvCode)) ? pRx->u8Len : sizeof(rcvCode)-1;
+	memcpy(rcvCode, pRx->auData, len);
+	rcvCode[len] = '\0';
+
+	DBGOUT(1, LB "%d", (int)rcvCode);
+
+	switch ((int)rcvCode) {
+	case VAL_INFORMATION_NORM :
+		// informLEDを点滅させる
+		sAppData.timestampInformFrom = u32TickCount_ms;
+	break;
+
+	case VAL_EMERG :
+		// alertLEDを点滅させる
+		sAppData.timestampAlertFrom = u32TickCount_ms;
+	break;
+	}
+	*/
+
+	// informLEDを点滅させる
+	sAppData.timestampInformFrom = u32TickCount_ms;
 
 	// UARTに出力
 	DBGOUT(1, LB "Message from %08x" LB, pRx->u32SrcAddr);
@@ -317,13 +341,26 @@ void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
     case E_AHI_DEVICE_TICK_TIMER:
 
 		// InformLED BLINK
-    	if (u32TickCount_ms & 0x400) {
-    		if (sAppData.remainCntInform > 0) {
-				vPortSet_TrueAsLo(LED_YELLOW, TRUE);
-				sAppData.remainCntInform--;
-    		}
-    		V_PRINT("remainCntInfrom -> $d", sAppData.remainCntInform);
+    	if (sAppData.timestampInformFrom != 0 && u32TickCount_ms - sAppData.timestampInformFrom < BLINK_TIME_INFORM) {
+    		vPortSet_TrueAsLo(LED_YELLOW, u32TickCount_ms & BLINK_SPEED_INFORM);
+    	} else {
+    		sAppData.timestampInformFrom = 0;
+    		vPortSetHi(LED_YELLOW);
     	}
+
+    	// AlertLED BLINK
+    	if (sAppData.timestampAlertFrom != 0 && u32TickCount_ms - sAppData.timestampAlertFrom < BLINK_TIME_ALERT) {
+    		vPortSet_TrueAsLo(LED_RED, u32TickCount_ms & BLINK_SPEED_ALERT);
+    	} else {
+    		sAppData.timestampAlertFrom = 0;
+    		// モードと共有しているため sAppData.modeの値に応じて変更
+    		if (sAppData.mode) {
+    			vPortSetLo(LED_RED);
+    		} else {
+        		vPortSetHi(LED_RED);
+    		}
+    	}
+
     	break;
 
     default:
@@ -477,7 +514,7 @@ static void vHandleSerialInput(void)
 			}
 			break;
 
-		case 't': // パケット送信してみる
+		case 'i': case 'e': // Information / Emergency を送信
 			_C {
 				// transmit Ack back
 				tsTxDataApp tsTx;
@@ -490,13 +527,17 @@ static void vHandleSerialInput(void)
 
 				tsTx.bAckReq = FALSE;
 				tsTx.u8Retry = 0x82; // ブロードキャストで都合３回送る
-				tsTx.u8CbId = sAppData.u32Seq & 0xFF;
-				tsTx.u8Seq = sAppData.u32Seq & 0xFF;
-				tsTx.u8Cmd = TOCONET_PACKET_CMD_APP_DATA;
+				tsTx.u8CbId  = sAppData.u32Seq & 0xFF;
+				tsTx.u8Seq   = sAppData.u32Seq & 0xFF;
+				tsTx.u8Cmd   = TOCONET_PACKET_CMD_APP_DATA;
 
 				// SPRINTF でメッセージを作成
 				SPRINTF_vRewind();
-				vfPrintf(SPRINTF_Stream, "PING: %08X", ToCoNet_u32GetSerial());
+				if (i16Char == 'i') {
+					vfPrintf(SPRINTF_Stream, "%d", VAL_INFORMATION_NORM);
+				} else if (i16Char == 'e') {
+					vfPrintf(SPRINTF_Stream, "%d", VAL_EMERG);
+				}
 				memcpy(tsTx.auData, SPRINTF_pu8GetBuff(), SPRINTF_u16Length());
 				tsTx.u8Len = SPRINTF_u16Length();
 
@@ -504,7 +545,11 @@ static void vHandleSerialInput(void)
 				ToCoNet_bMacTxReq(&tsTx);
 
 				// UARTに出力
-				DBGOUT(1, LB "Broadcast Message Sent.");
+				if (i16Char == 'i') {
+					DBGOUT(1, LB "INFORMATION REQUEST SENT CODE = 10");
+				} else if (i16Char == 'e') {
+					DBGOUT(1, LB "EMERGENCY REQUEST SENT CODE = 99");
+				}
 			}
 			break;
 
@@ -564,9 +609,9 @@ static int16 i16TransmitIoData(bool_t bQuick, bool_t bRegular) {
 
 	{
 		/* MAC モードでは細かい指定が可能 */
-		sTx.bAckReq = FALSE;
-		sTx.u32SrcAddr = sToCoNet_AppContext.u16ShortAddress;
-		sTx.u16RetryDur = bQuick ? 0 : 4; // 再送間隔
+		sTx.bAckReq     = FALSE;
+		sTx.u32SrcAddr  = sToCoNet_AppContext.u16ShortAddress;
+		sTx.u16RetryDur = bQuick ? 0 : 4;  // 再送間隔
 		sTx.u16DelayMax = bQuick ? 0 : 16; // 衝突を抑制するため送信タイミングにブレを作る(最大16ms)
 
 		// 送信API

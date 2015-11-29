@@ -59,11 +59,11 @@ typedef struct {
     // 自身の状態 0 or 1
 	bool_t mode;
 
-	// 情報LEDを点滅させる(残り)回数
-	uint32 remainCntInform;
+	// 情報LEDを点滅させる時間に利用 内部起動時間記録用
+	uint32 timestampInformFrom;
 
-	// アラートLEDを点滅させる(残り)回数
-	uint32 remainCntAlert;
+	// アラートLEDを点滅させる時間に利用 内部起動時間記録用
+	uint32 timestampAlertFrom;
 
 } tsAppData;
 
@@ -75,11 +75,22 @@ typedef struct {
 /***        Exported Variables                                            ***/
 /****************************************************************************/
 
-#define SWITCH_SHIFT  12 // シフトスイッチ
-#define LED_RED        4 // LED赤
-#define LED_GLEEN     19 // LED緑
-#define LED_YELLOW    18 // LED黄 INFORM用途
-#define UART_BAUD 115200 // シリアルのボーレート
+#define SWITCH_SHIFT          12 // シフトスイッチ
+#define LED_RED                4 // LED赤
+#define LED_GLEEN             19 // LED緑
+#define LED_YELLOW            18 // LED黄 INFORM用途
+
+#define BLINK_TIME_INFORM  10000 // 約設定値ms Information LEDを点滅させる
+#define BLINK_SPEED_INFORM 0x400 // u32TickCount_ms & 設定値で LEDを点滅させる (4ms毎に評価)
+
+#define BLINK_TIME_ALERT   15000 // 約設定値ms Alert LEDを点滅させる
+#define BLINK_SPEED_ALERT  0x200 // u32TickCount_ms & 設定値で LEDを点滅させる (4ms毎に評価)
+
+#define UART_BAUD         115200 // シリアルのボーレート
+
+#define VAL_INFORMATION_NORM  10 // イベント通知 通常
+#define VAL_INFORMATION_EMERG 15 // イベント通知 高
+#define VAL_EMERG             99 // 緊急事態
 
 #if defined __cplusplus
 }
