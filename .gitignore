@@ -1,0 +1,12 @@
+.metadata/
+App_Audio/
+App_IO/
+App_Melody/
+App_Twelite/
+App_Uart/
+Samp_ContTx/
+Samp_I2C/
+Samp_Monitor/
+Samp_PER/
+Samp_PingPong/
+Samp_Wayback/
